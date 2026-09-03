@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Interactive Bouncing Balls – Full Feature</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;font-family:sans-serif;background:#111;}
+  #canvas{display:block;position:fixed;background:#111;border:2px solid #333;box-sizing:border-box;transform:translate(-50%,-50%);}
+  #panel{
+    position:fixed;top:0;right:0;width:260px;height:100%;background:#222;color:#eee;
+    padding:15px;box-sizing:border-box;overflow-y:auto;border-left:2px solid #555;
+    z-index:2;
+  }
+  #panel h2{margin:0 0 10px;font-size:1.2em;}
+  .ctrl{margin-bottom:12px;}
+  .ctrl label{display:block;margin-bottom:4px;font-size:.9em;}
+  .ctrl input[type=range],
+  .ctrl input[type=number],
+  .ctrl select{width:100%;}
+  .ctrl input[type=color]{height:30px;padding:0;}
+  button{width:100%;padding:8px;margin-top:6px;background:#444;border:none;color:#eee;cursor:pointer;}
+  button:hover{background:#555;}
+  #btn-fullscreen{
+    position:fixed;top:12px;right:272px;width:42px;height:38px;margin:0;padding:0;
+    border:1px solid #666;border-radius:5px;font-size:1.35em;line-height:1;
+    z-index:5;
+  }
+  :fullscreen{background:#111;}
+  :fullscreen #btn-fullscreen{right:272px;}
+  #msgOverlay{
+    position:fixed;top:0;left:0;width:100%;height:100%;
+    display:flex;justify-content:center;align-items:center;
+    pointer-events:none;background:rgba(0,0,0,0.6);color:#fff;font-size:2em;
+    z-index:1;opacity:0;transition:opacity .4s;white-space:pre-line;text-align:center;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<button id="btn-fullscreen" type="button" aria-label="Enter fullscreen" title="Enter fullscreen">⛶</button>
+
+<div id="panel">
+  <h2>⚙️ Controls</h2>
+
+  <div class="ctrl">
+    <label for="select-format">Video format</label>
+    <select id="select-format">
+      <option value="shorts" selected>Shorts (9:16)</option>
+      <option value="fullscreen">Full screen (16:9)</option>
+    </select>
+  </div>
+
+  <div class="ctrl">
+    <label for="range-ball-count">Number of balls</label>
+    <input id="range-ball-count" type="range" min="1" max="200" value="30">
+    <span id="val-ball-count">30</span>
+  </div>
+
+  <div class="ctrl">
+    <label for="range-ball-size">Ball size (px)</label>
+    <input id="range-ball-size" type="range" min="5" max="50" value="20">
+    <span id="val-ball-size">20</span>
+  </div>
+
+  <div class="ctrl">
+    <label for="color-ball">Ball colour</label>
+    <input id="color-ball" type="color" value="#ff5722">
+  </div>
+
+  <div class="ctrl">
+    <label for="range-speed-factor">Speed factor</label>
+    <input id="range-speed-factor" type="range" min="0.1" max="3" step="0.1" value="1">
+    <span id="val-speed-factor">1.0</span>
+  </div>
+
+  <div class="ctrl">
+    <label for="range-elasticity">Elasticity (bounciness)</label>
+    <input id="range-elasticity" type="range" min="0.1" max="1" step="0.05" value="1">
+    <span id="val-elasticity">1.00</span>
+  </div>
+
+  <div class="ctrl">
+    <label for="select-trail">Trail effect</label>
+    <select id="select-trail">
+      <option value="none">None</option>
+      <option value="fade" selected>Fade</option>
+      <option value="dots">Dots</option>
+    </select>
+  </div>
+
+  <div class="ctrl">
+    <label for="range-hazard-count">Number of hazards</label>
+    <input id="range-hazard-count" type="range" min="0" max="30" value="5">
+    <span id="val-hazard-count">5</span>
+  </div>
+
+  <div class="ctrl">
+    <label for="range-plank-size">Plank length (px)</label>
+    <input id="range-plank-size" type="range" min="30" max="140" value="52">
+    <span id="val-plank-size">52</span>
+  </div>
+
+  <h2>🕹️ Modes</h2>
+  <button id="btn-hazard-hunt">Hazard Hunt</button>
+  <button id="btn-meteor-shower">Meteor Shower</button>
+  <button id="btn-rotating-field">Rotating Field</button>
+  <button id="btn-team-battle">Team Battle</button>
+
+  <h2>🧹 Reset</h2>
+  <button id="btn-reset">Reset Balls</button>
+</div>
+
+<div id="msgOverlay"></div>
+
+<script>
+/* ==========================================================
+   Canvas setup
+   ========================================================== */
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function fitCanvas() {
+  const panelWidth = document.getElementById('panel').offsetWidth;
+  const availableWidth = Math.max(1, window.innerWidth - panelWidth);
+  const availableHeight = Math.max(1, window.innerHeight);
+  const isSiteFullscreen = Boolean(document.fullscreenElement);
+  const isFullscreenFormat = document.getElementById('select-format').value === 'fullscreen';
+  const aspectRatio = isFullscreenFormat ? 16 / 9 : 9 / 16;
+  const widthScale = isSiteFullscreen && isFullscreenFormat ? 1 : 0.92;
+  const width = Math.max(1, Math.min(availableWidth, availableHeight * aspectRatio) * widthScale);
+  const height = Math.max(1, width / aspectRatio);
+  canvas.width = Math.round(width);
+  canvas.height = Math.round(height);
+
+  const isShortsInFullscreen = isSiteFullscreen && !isFullscreenFormat;
+  const fullscreenMargin = 0;
+  canvas.style.left = isShortsInFullscreen
+    ? `${width / 2 + fullscreenMargin}px`
+    : `${availableWidth / 2}px`;
+  canvas.style.top = isShortsInFullscreen
+    ? `${availableHeight - height / 2 - fullscreenMargin}px`
+    : `${availableHeight / 2}px`;
+
+  const overlay = document.getElementById('msgOverlay');
+  overlay.style.left = canvas.style.left;
+  overlay.style.top = canvas.style.top;
+  overlay.style.width = `${canvas.width}px`;
+  overlay.style.height = `${canvas.height}px`;
+  overlay.style.transform = 'translate(-50%, -50%)';
+}
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+/* ==========================================================
+   UI elements
+   ========================================================== */
+const ui = {
+  format:       document.getElementById('select-format'),
+  ballCount:    document.getElementById('range-ball-count'),
+  ballCountVal: document.getElementById('val-ball-count'),
+  ballSize:     document.getElementById('range-ball-size'),
+  ballSizeVal:  document.getElementById('val-ball-size'),
+  ballColor:    document.getElementById('color-ball'),
+  speedFactor:  document.getElementById('range-speed-factor'),
+  speedFactorVal: document.getElementById('val-speed-factor'),
+  elasticity:   document.getElementById('range-elasticity'),
+  elasticityVal:document.getElementById('val-elasticity'),
+  trail:        document.getElementById('select-trail'),
+  hazardCount:  document.getElementById('range-hazard-count'),
+  hazardCountVal: document.getElementById('val-hazard-count'),
+  plankSize:    document.getElementById('range-plank-size'),
+  plankSizeVal: document.getElementById('val-plank-size'),
+  resetBtn:     document.getElementById('btn-reset'),
+  fullscreenBtn: document.getElementById('btn-fullscreen'),
+  modeBtns: {
+    hazards: document.getElementById('btn-hazard-hunt'),
+    meteors: document.getElementById('btn-meteor-shower'),
+    rotating: document.getElementById('btn-rotating-field'),
+    teams: document.getElementById('btn-team-battle')
+  }
+};
+
+/* ==========================================================
+   Global simulation parameters (default)
+   ========================================================== */
+let elasticity   = parseFloat(ui.elasticity.value);
+let speedFactor  = parseFloat(ui.speedFactor.value);
+let trailMode    = ui.trail.value; // "none" | "fade" | "dots"
+let ballSize     = parseInt(ui.ballSize.value);
+let ballColour   = ui.ballColor.value;
+let activeMode   = 'slow';
+let hazards      = [];
+let hazardCount  = parseInt(ui.hazardCount.value, 10);
+let plankSize    = parseInt(ui.plankSize.value, 10);
+const TEAM_COLORS = { top: '#38bdf8', bottom: '#fb7185' };
+const ROTATING_PLANK_COUNT = 3;
+
+/* ==========================================================
+   Ball class (includes a numeric label)
+   ========================================================== */
+class Ball {
+  constructor(x, y, vx, vy, r, colour, id, team = null) {
+    this.x = x; this.y = y;
+    this.vx = vx; this.vy = vy;
+    this.initialSpeed = Math.hypot(vx, vy);
+    this.r = r;
+    this.colour = colour;
+    this.id = id;
+    this.team = team;
+    this.lives = 5;
+    this.hitCooldown = 0;
+    this.alive = true;
+  }
+
+  keepInitialSpeed() {
+    const currentSpeed = Math.hypot(this.vx, this.vy);
+    if (currentSpeed > 0 && this.initialSpeed > 0) {
+      const ratio = this.initialSpeed / currentSpeed;
+      this.vx *= ratio;
+      this.vy *= ratio;
+    }
+  }
+
+  update(dt) {
+    if (!this.alive) return;
+    this.hitCooldown = Math.max(0, this.hitCooldown - dt * 16.6667);
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    if (this.x - this.r < 0) {
+      this.x = this.r;
+      this.vx = Math.abs(this.vx);
+    } else if (this.x + this.r > canvas.width) {
+      this.x = canvas.width - this.r;
+      this.vx = -Math.abs(this.vx);
+    }
+    if (this.y - this.r < 0) {
+      this.y = this.r;
+      this.vy = Math.abs(this.vy);
+    } else if (this.y + this.r > canvas.height) {
+      this.y = canvas.height - this.r;
+      this.vy = -Math.abs(this.vy);
+    }
+  }
+
+  draw() {
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.fillStyle = this.colour;
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = `${Math.max(10, this.r * 0.8)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(this.id, this.x, this.y);
+    if (this.team) {
+      ctx.font = `${Math.max(8, this.r * 0.45)}px sans-serif`;
+      ctx.fillText(this.lives, this.x, this.y + this.r * 0.62);
+    }
+  }
+}
+
+class Hazard {
+  constructor(x, y, vx, vy, radius, type = 'moving') {
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.r = radius;
+    this.angle = 0;
+    this.type = type;
+  }
+
+  update(dt) {
+    if (this.type === 'meteor') {
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+      this.angle += 0.08 * dt;
+      if (this.y - this.r > canvas.height) {
+        this.x = this.r + Math.random() * Math.max(0, canvas.width - this.r * 2);
+        this.y = -this.r;
+      }
+      if (this.x < -this.r) this.x = canvas.width + this.r;
+      if (this.x > canvas.width + this.r) this.x = -this.r;
+      return;
+    }
+    if (this.type === 'rotating') {
+      this.angle += 0.08 * dt;
+      return;
+    }
+    if (this.type === 'static') return;
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.angle += 0.04 * dt;
+    if (this.x - this.r < 0 || this.x + this.r > canvas.width) {
+      this.vx *= -1;
+      this.x = Math.max(this.r, Math.min(canvas.width - this.r, this.x));
+    }
+    if (this.y - this.r < 0 || this.y + this.r > canvas.height) {
+      this.vy *= -1;
+      this.y = Math.max(this.r, Math.min(canvas.height - this.r, this.y));
+    }
+  }
+
+  intersects(ball) {
+    return Math.hypot(this.x - ball.x, this.y - ball.y) <= this.r + ball.r;
+  }
+
+  pushes(ball) {
+    if (this.type !== 'rotating') return false;
+    const halfLength = Math.min(plankSize / 2, canvas.width / 2);
+    const halfWidth = Math.min(4, canvas.height / 2);
+    const cos = Math.cos(this.angle);
+    const sin = Math.sin(this.angle);
+    const localX = (ball.x - this.x) * cos + (ball.y - this.y) * sin;
+    const localY = -(ball.x - this.x) * sin + (ball.y - this.y) * cos;
+    const closestX = Math.max(-halfLength, Math.min(halfLength, localX));
+    const closestY = Math.max(-halfWidth, Math.min(halfWidth, localY));
+    const differenceX = localX - closestX;
+    const differenceY = localY - closestY;
+    const distance = Math.hypot(differenceX, differenceY);
+    if (distance > ball.r) return false;
+    const normalLocalX = distance === 0 ? 0 : differenceX / distance;
+    const normalLocalY = distance === 0 ? 1 : differenceY / distance;
+    const normalX = normalLocalX * cos - normalLocalY * sin;
+    const normalY = normalLocalX * sin + normalLocalY * cos;
+    const penetration = ball.r - distance + 0.01;
+    ball.x += normalX * penetration;
+    ball.y += normalY * penetration;
+    const velocityAlongNormal = ball.vx * normalX + ball.vy * normalY;
+    if (velocityAlongNormal < 0) {
+      ball.vx -= (1 + elasticity) * velocityAlongNormal * normalX;
+      ball.vy -= (1 + elasticity) * velocityAlongNormal * normalY;
+    }
+    return true;
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+    if (this.type === 'rotating') {
+      ctx.fillStyle = '#38bdf8';
+      ctx.shadowColor = '#7dd3fc';
+      ctx.shadowBlur = 12;
+      const halfLength = Math.min(plankSize / 2, canvas.width / 2);
+      const halfWidth = Math.min(4, canvas.height / 2);
+      ctx.fillRect(-halfLength, -halfWidth, halfLength * 2, halfWidth * 2);
+      ctx.fillStyle = '#e0f2fe';
+      ctx.fillRect(-halfWidth * 0.6, -halfWidth * 1.4, halfWidth * 1.2, halfWidth * 2.8);
+      ctx.restore();
+      return;
+    }
+    const isMeteor = this.type === 'meteor';
+    const isStatic = this.type === 'static';
+    ctx.fillStyle = isMeteor ? '#f59e0b' : isStatic ? '#8b1e3f' : '#ef3340';
+    ctx.shadowColor = isMeteor ? '#ffd166' : isStatic ? '#d94666' : '#ff6870';
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const angle = i * Math.PI / 4;
+      const radius = i % 2 === 0 ? this.r : this.r * 0.45;
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    if (isMeteor) {
+      ctx.strokeStyle = 'rgba(255, 209, 102, 0.45)';
+      ctx.lineWidth = Math.max(2, this.r * 0.25);
+      ctx.beginPath();
+      ctx.moveTo(0, this.r * 1.1);
+      ctx.lineTo(0, this.r * 2.8);
+      ctx.stroke();
+    }
+    if (isStatic) {
+      ctx.fillStyle = '#ff8fa3';
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(2, this.r * 0.2), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+let balls = [];
+let appliedSpeedFactor = speedFactor;
+let lastTime = performance.now();
+let winnerAnnounced = false;
+let gameEnded = false;
+let gameStarted = false;
+let countdownTimer = null;
+let endTimer = null;
+
+function syncUI() {
+  ui.ballCountVal.textContent = ui.ballCount.value;
+  ui.ballSizeVal.textContent = ui.ballSize.value;
+  ui.speedFactorVal.textContent = parseFloat(ui.speedFactor.value).toFixed(2);
+  ui.elasticityVal.textContent = parseFloat(ui.elasticity.value).toFixed(2);
+  ui.hazardCountVal.textContent = ui.hazardCount.value;
+  ui.plankSizeVal.textContent = ui.plankSize.value;
+}
+
+function createBalls() {
+  clearTimeout(endTimer);
+  balls = [];
+  winnerAnnounced = false;
+  gameEnded = false;
+  ballSize = parseInt(ui.ballSize.value, 10);
+  ballColour = ui.ballColor.value;
+  const count = parseInt(ui.ballCount.value, 10);
+  const radius = Math.min(ballSize, canvas.width / 2, canvas.height / 2);
+  for (let i = 0; i < count; i++) {
+    let x;
+    let y;
+    let attempts = 0;
+    const team = activeMode === 'teams' ? (i < Math.ceil(count / 2) ? 'top' : 'bottom') : null;
+    do {
+      x = radius + Math.random() * Math.max(0, canvas.width - radius * 2);
+      y = team === 'top'
+        ? radius + Math.random() * Math.max(0, canvas.height * 0.28 - radius)
+        : team === 'bottom'
+          ? canvas.height * 0.72 + Math.random() * Math.max(0, canvas.height * 0.28 - radius)
+          : radius + Math.random() * Math.max(0, canvas.height - radius * 2);
+      attempts++;
+    } while (hazards.some(hazard => Math.hypot(hazard.x - x, hazard.y - y) <= hazard.r + radius) && attempts < 30);
+    const angle = Math.random() * Math.PI * 2;
+    const speed = (1 + Math.random() * 2) * speedFactor;
+    const colour = team ? TEAM_COLORS[team] : ballColour;
+    balls.push(new Ball(
+      x,
+      y,
+      Math.cos(angle) * speed,
+      Math.sin(angle) * speed,
+      radius,
+      colour,
+      i + 1,
+      team
+    ));
+  }
+}
+
+function createHazards() {
+  hazards = [];
+  if (!['hazards', 'meteors', 'rotating'].includes(activeMode)) return;
+  const radius = Math.min(14, canvas.width / 8, canvas.height / 8);
+  const objectCount = activeMode === 'rotating' ? hazardCount + ROTATING_PLANK_COUNT : hazardCount;
+  for (let i = 0; i < objectCount; i++) {
+    const isMeteor = activeMode === 'meteors';
+    const type = isMeteor ? 'meteor' : activeMode === 'rotating'
+      ? (i < ROTATING_PLANK_COUNT ? 'rotating' : 'static')
+      : 'moving';
+    const angle = Math.random() * Math.PI * 2;
+    hazards.push(new Hazard(
+      radius + Math.random() * Math.max(0, canvas.width - radius * 2),
+      isMeteor ? -Math.random() * canvas.height : radius + Math.random() * Math.max(0, canvas.height - radius * 2),
+      isMeteor ? (Math.random() - 0.5) * 1.2 : Math.cos(angle) * 1.8,
+      isMeteor ? 1.5 + Math.random() * 1.5 : Math.sin(angle) * 1.8,
+      radius,
+      type
+    ));
+  }
+}
+
+function constrainBalls() {
+  const radius = Math.min(ballSize, canvas.width / 2, canvas.height / 2);
+  balls.forEach(ball => {
+    ball.r = radius;
+    ball.x = Math.max(radius, Math.min(canvas.width - radius, ball.x));
+    ball.y = Math.max(radius, Math.min(canvas.height - radius, ball.y));
+  });
+}
+
+window.addEventListener('resize', () => {
+  fitCanvas();
+  constrainBalls();
+  createHazards();
+});
+
+function updateSettings() {
+  const previousSpeedFactor = appliedSpeedFactor;
+  elasticity = parseFloat(ui.elasticity.value);
+  speedFactor = parseFloat(ui.speedFactor.value);
+  trailMode = ui.trail.value;
+  ballSize = parseInt(ui.ballSize.value, 10);
+  ballColour = ui.ballColor.value;
+  hazardCount = parseInt(ui.hazardCount.value, 10);
+  plankSize = parseInt(ui.plankSize.value, 10);
+  if (previousSpeedFactor !== speedFactor && previousSpeedFactor > 0) {
+    const ratio = speedFactor / previousSpeedFactor;
+    balls.forEach(ball => {
+      ball.vx *= ratio;
+      ball.vy *= ratio;
+      ball.initialSpeed *= ratio;
+    });
+  }
+  appliedSpeedFactor = speedFactor;
+  syncUI();
+  if (balls.length !== parseInt(ui.ballCount.value, 10)) createBalls();
+  const radius = Math.min(ballSize, canvas.width / 2, canvas.height / 2);
+  balls.forEach(ball => {
+    ball.r = radius;
+    ball.colour = ball.team ? TEAM_COLORS[ball.team] : ballColour;
+    ball.x = Math.max(radius, Math.min(canvas.width - radius, ball.x));
+    ball.y = Math.max(radius, Math.min(canvas.height - radius, ball.y));
+  });
+}
+
+function showMessage(message, duration = 900) {
+  const overlay = document.getElementById('msgOverlay');
+  overlay.textContent = message;
+  overlay.style.opacity = '1';
+  clearTimeout(showMessage.timer);
+  if (duration > 0) {
+    showMessage.timer = setTimeout(() => { overlay.style.opacity = '0'; }, duration);
+  }
+}
+
+/* Machine-readable game state for the recording automation (video_automation.py
+   waits for these values on #msgOverlay[data-state]):
+     ready    -> a mode has been configured, waiting to be started
+     countdown-> play area was clicked, 3-2-1 running
+     playing  -> gameplay is actually running
+     winner   -> a winner was announced
+     game-over-> the round is finished */
+function setGameState(state) {
+  document.getElementById('msgOverlay').dataset.state = state;
+}
+
+function prepareGame() {
+  clearInterval(countdownTimer);
+  clearTimeout(endTimer);
+  gameStarted = false;
+  gameEnded = false;
+  winnerAnnounced = false;
+  showMessage('Choose your number', 0);
+  setGameState('ready');
+}
+
+function startGame() {
+  if (gameStarted || countdownTimer) return;
+  if (gameEnded) {
+    createHazards();
+    createBalls();
+  }
+  setGameState('countdown');
+  let secondsRemaining = 3;
+  showMessage(`Choose your number\nStarting in ${secondsRemaining}...`, 0);
+
+  countdownTimer = setInterval(() => {
+    secondsRemaining--;
+    if (secondsRemaining > 0) {
+      showMessage(`Choose your number\nStarting in ${secondsRemaining}...`, 0);
+      return;
+    }
+
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+    gameStarted = true;
+    setGameState('playing');
+    lastTime = performance.now();
+    showMessage('Go!', 700);
+  }, 1000);
+}
+
+function applyMode(name) {
+  const modes = {
+    hazards: ['1', '1'],
+    meteors: ['1', '1'],
+    rotating: ['1', '1'],
+    teams: ['1', '1']
+  };
+  activeMode = name;
+  const values = modes[name];
+  if (!values) return;
+  ui.speedFactor.value = values[0];
+  ui.elasticity.value = values[1];
+  updateSettings();
+  createHazards();
+  createBalls();
+  prepareGame();
+}
+
+ui.format.addEventListener('change', () => {
+  fitCanvas();
+  constrainBalls();
+  createHazards();
+});
+ui.ballCount.addEventListener('input', updateSettings);
+ui.ballSize.addEventListener('input', updateSettings);
+ui.ballColor.addEventListener('input', updateSettings);
+ui.speedFactor.addEventListener('input', updateSettings);
+ui.elasticity.addEventListener('input', updateSettings);
+ui.trail.addEventListener('change', updateSettings);
+ui.hazardCount.addEventListener('input', () => {
+  updateSettings();
+  createHazards();
+});
+ui.plankSize.addEventListener('input', () => {
+  updateSettings();
+  if (activeMode === 'rotating') createHazards();
+});
+ui.resetBtn.addEventListener('click', () => { createBalls(); prepareGame(); });
+ui.fullscreenBtn.addEventListener('click', async () => {
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else {
+      await document.documentElement.requestFullscreen();
+    }
+  } catch (error) {
+    showMessage('Fullscreen is not available in this browser.', 1800);
+  }
+});
+document.addEventListener('fullscreenchange', () => {
+  const isFullscreen = Boolean(document.fullscreenElement);
+  ui.fullscreenBtn.textContent = '⛶';
+  ui.fullscreenBtn.setAttribute('aria-label', isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen');
+  ui.fullscreenBtn.title = isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen';
+  ui.fullscreenBtn.setAttribute('aria-pressed', String(isFullscreen));
+  fitCanvas();
+  constrainBalls();
+});
+canvas.addEventListener('click', startGame);
+Object.entries(ui.modeBtns).forEach(([name, button]) => {
+  button.addEventListener('click', () => applyMode(name));
+});
+
+function resolveBallCollisions() {
+  for (let firstIndex = 0; firstIndex < balls.length; firstIndex++) {
+    const first = balls[firstIndex];
+    if (!first.alive) continue;
+    for (let secondIndex = firstIndex + 1; secondIndex < balls.length; secondIndex++) {
+      const second = balls[secondIndex];
+      if (!second.alive) continue;
+      const dx = second.x - first.x;
+      const dy = second.y - first.y;
+      const minimumDistance = first.r + second.r;
+      const distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared >= minimumDistance * minimumDistance) continue;
+
+      const distance = Math.sqrt(distanceSquared);
+      const normalX = distance === 0 ? 1 : dx / distance;
+      const normalY = distance === 0 ? 0 : dy / distance;
+      const overlap = minimumDistance - distance + 0.01;
+      first.x -= normalX * overlap / 2;
+      first.y -= normalY * overlap / 2;
+      second.x += normalX * overlap / 2;
+      second.y += normalY * overlap / 2;
+
+      const relativeVelocityX = second.vx - first.vx;
+      const relativeVelocityY = second.vy - first.vy;
+      const velocityAlongNormal = relativeVelocityX * normalX + relativeVelocityY * normalY;
+      if (velocityAlongNormal < 0) {
+        const impulse = -(1 + elasticity) * velocityAlongNormal / 2;
+        first.vx -= impulse * normalX;
+        first.vy -= impulse * normalY;
+        second.vx += impulse * normalX;
+        second.vy += impulse * normalY;
+      }
+    }
+  }
+}
+
+function applyTeamDamage() {
+  if (activeMode !== 'teams') return;
+  for (let firstIndex = 0; firstIndex < balls.length; firstIndex++) {
+    const first = balls[firstIndex];
+    if (!first.alive || !first.team) continue;
+    for (let secondIndex = firstIndex + 1; secondIndex < balls.length; secondIndex++) {
+      const second = balls[secondIndex];
+      if (!second.alive || first.team === second.team || first.hitCooldown > 0 || second.hitCooldown > 0) continue;
+      const distance = Math.hypot(second.x - first.x, second.y - first.y);
+      if (distance <= first.r + second.r) {
+        first.lives--;
+        second.lives--;
+        first.hitCooldown = 350;
+        second.hitCooldown = 350;
+        if (first.lives <= 0) first.alive = false;
+        if (second.lives <= 0) second.alive = false;
+      }
+    }
+  }
+}
+
+function animate(timestamp) {
+  if (gameEnded) {
+    requestAnimationFrame(animate);
+    return;
+  }
+  const dt = Math.min(50, Math.max(0, timestamp - lastTime)) / 16.6667;
+  lastTime = timestamp;
+  if (trailMode === 'fade') {
+    ctx.fillStyle = 'rgba(17,17,17,0.25)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  } else {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  if (gameStarted) {
+    hazards.forEach(hazard => hazard.update(dt));
+    balls.forEach(ball => ball.update(dt));
+    applyTeamDamage();
+    resolveBallCollisions();
+    balls.forEach(ball => {
+      if (!ball.alive) return;
+      hazards.forEach(hazard => {
+        if (hazard.type === 'rotating') {
+          hazard.pushes(ball);
+        } else if (hazard.intersects(ball)) {
+          ball.alive = false;
+        }
+      });
+    });
+    balls.forEach(ball => {
+      if (ball.alive) ball.keepInitialSpeed();
+    });
+    const livingBalls = balls.filter(ball => ball.alive);
+    const livingTeams = [...new Set(livingBalls.map(ball => ball.team).filter(Boolean))];
+    const teamsInRound = [...new Set(balls.map(ball => ball.team).filter(Boolean))];
+    if (activeMode === 'teams' && !winnerAnnounced && teamsInRound.length === 2 && livingTeams.length === 1) {
+      const winningTeam = livingTeams[0];
+      showMessage(`${winningTeam === 'top' ? 'Blue' : 'Pink'} team won!`, 3000);
+      winnerAnnounced = true;
+      setGameState('winner');
+      endTimer = setTimeout(() => {
+      gameEnded = true;
+      gameStarted = false;
+      setGameState('game-over');
+      showMessage('Game Over', 0);
+      }, 3000);
+    } else if (['hazards', 'meteors', 'rotating'].includes(activeMode) && !winnerAnnounced && balls.length > 1 && livingBalls.length === 1) {
+      showMessage(`Ball number ${livingBalls[0].id} won!`, 3000);
+      winnerAnnounced = true;
+      setGameState('winner');
+      endTimer = setTimeout(() => {
+      gameEnded = true;
+      gameStarted = false;
+      setGameState('game-over');
+      showMessage('Game Over', 0);
+      }, 3000);
+    }
+  }
+  if (trailMode === 'dots') {
+    balls.forEach(ball => {
+      if (!ball.alive) return;
+      ctx.fillStyle = ball.colour;
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(ball.x - 1, ball.y - 1, 2, 2);
+      ctx.globalAlpha = 1;
+    });
+  }
+  hazards.forEach(hazard => hazard.draw());
+  balls.forEach(ball => {
+    if (ball.alive) ball.draw();
+  });
+  requestAnimationFrame(animate);
+}
+
+syncUI();
+createBalls();
+prepareGame();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
