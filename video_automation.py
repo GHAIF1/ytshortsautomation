@@ -17,7 +17,8 @@ Usage
 -----
     python video_automation.py                 # run the full workflow
     python video_automation.py --mode team-battle
-    python video_automation.py --calibrate     # print the capture rectangle
+    python video_automation.py --calibrate     # fullscreen + measure + dry-run
+                                               # one game (no recording)
     python video_automation.py --no-upload     # record only, skip YouTube
 """
 
@@ -111,13 +112,22 @@ def say(number, message):
     print(f"\n[{number}/{STAGE_TOTAL}] {message}")
 
 
+def _ffmpeg_path():
+    """Resolve the FFmpeg executable (config value, PATH, or the standard
+    winget location even when the current terminal's PATH is stale)."""
+    if os.path.sep in FFMPEG_BINARY or "/" in FFMPEG_BINARY:   # looks like a path
+        return FFMPEG_BINARY if Path(FFMPEG_BINARY).exists() else None
+    found = shutil.which(FFMPEG_BINARY)
+    if found:
+        return found
+    links = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links"
+    candidate = links / f"{FFMPEG_BINARY}.exe"
+    return str(candidate) if candidate.exists() else None
+
+
 def check_ffmpeg():
     """Fail early with a helpful message if FFmpeg is missing."""
-    ffmpeg = FFMPEG_BINARY
-    if os.path.sep in ffmpeg or "/" in ffmpeg:      # looks like a path
-        if Path(ffmpeg).exists():
-            return
-    elif shutil.which(ffmpeg):
+    if _ffmpeg_path():
         return
     sys.exit(
         "FFmpeg was not found. Install it, e.g. with:\n"
@@ -140,6 +150,122 @@ def require_playwright():
 
 
 # --------------------------------------------------------------------------
+#  Browser window management (Win32, no CDP)
+# --------------------------------------------------------------------------
+
+# Restore (if minimized), maximize and focus the Chromium window whose page
+# title contains "Bouncing Balls". Run through PowerShell so no Python window
+# libraries are needed. CDP Browser.* calls are deliberately avoided: on some
+# Playwright builds they hang the sync API.
+_WIN32_ACTIVATE_SCRIPT = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class W32 {
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+}
+"@
+$p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like '*Bouncing Balls*' } | Sort-Object StartTime -Descending | Select-Object -First 1
+if ($null -eq $p) { exit }
+if ([W32]::IsIconic($p.MainWindowHandle)) { [W32]::ShowWindow($p.MainWindowHandle, 9) | Out-Null }
+[W32]::ShowWindow($p.MainWindowHandle, 3) | Out-Null
+[W32]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
+'''
+
+
+def _win32_activate_browser_window():
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             _WIN32_ACTIVATE_SCRIPT],
+            capture_output=True, text=True, timeout=25,
+        )
+    except Exception as error:
+        print(f"  ! Could not activate the browser window: {error}")
+
+
+def ensure_window_visible(page):
+    """Restore + maximize + focus the browser window.
+
+    A hidden/minimized tab pauses requestAnimationFrame, which would freeze
+    the game - game over would never be detected - so the window must stay
+    visible during the whole run.
+    """
+    _win32_activate_browser_window()
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    time.sleep(0.4)
+
+
+def enter_fullscreen(page):
+    """Put the page in OS fullscreen.
+
+    Playwright's clicks count as real user input, so the site's fullscreen
+    button is allowed to request fullscreen. Retries a few times in case the
+    request was ignored.
+    """
+    for attempt in (1, 2, 3):
+        ensure_window_visible(page)
+        if not page.evaluate("Boolean(document.fullscreenElement)"):
+            page.click(FULLSCREEN_SELECTOR)
+        try:
+            page.wait_for_function(
+                "document.fullscreenElement !== null "
+                "&& document.visibilityState === 'visible'",
+                timeout=6000,
+            )
+            time.sleep(0.6)      # let the fullscreen layout settle
+            return
+        except Exception:
+            print(f"  ! Fullscreen did not engage (attempt {attempt}/3) - retrying ...")
+    raise RuntimeError(
+        "The browser could not enter fullscreen. Make sure the window is "
+        "visible (not minimized) and try again."
+    )
+
+
+def wait_for_game_over(page, max_seconds):
+    """Poll for the game-over state while keeping the tab visible/fullscreen.
+
+    Returns True when the site reports game over, False on safety timeout.
+    """
+    start = time.time()
+    deadline = start + max_seconds
+    last_report = start
+    while time.time() < deadline:
+        if page.locator(GAME_OVER_SELECTOR).count() > 0:
+            return True
+        # A minimized or hidden tab pauses the game (requestAnimationFrame),
+        # so restore the window and re-enter fullscreen if needed.
+        try:
+            hidden = not page.evaluate("document.visibilityState === 'visible'")
+            fullscreen = page.evaluate("Boolean(document.fullscreenElement)")
+        except Exception:
+            hidden = True
+            fullscreen = True
+        if hidden or not fullscreen:
+            print("  ! Browser window is hidden or left fullscreen - restoring it ...")
+            ensure_window_visible(page)
+            if not fullscreen:
+                try:
+                    page.click(FULLSCREEN_SELECTOR)
+                except Exception:
+                    pass
+                time.sleep(0.5)
+        elapsed = time.time() - start
+        if time.time() - last_report >= 15:
+            print(f"  ... game still running ({int(elapsed)}s) ...")
+            last_report = time.time()
+        time.sleep(0.5)
+    return False
+
+
+# --------------------------------------------------------------------------
 #  FFmpeg screen recorder (Windows gdigrab)
 # --------------------------------------------------------------------------
 
@@ -150,7 +276,7 @@ class FFmpegRecorder:
         width = rect["width"] - (rect["width"] % 2)     # libx264 needs even sizes
         height = rect["height"] - (rect["height"] % 2)
         cmd = [
-            FFMPEG_BINARY, "-hide_banner", "-loglevel", "error", "-y",
+            _ffmpeg_path() or FFMPEG_BINARY, "-hide_banner", "-loglevel", "error", "-y",
             "-f", "gdigrab",
             "-framerate", str(fps),
             "-offset_x", str(rect["x"]),
@@ -276,110 +402,6 @@ def determine_capture_rect(page):
 #  Website / browser workflow
 # --------------------------------------------------------------------------
 
-def ensure_window_ready(page):
-    """Restore the browser window (if minimized/background), move it to the
-    primary monitor's top-left corner and bring it to the front.
-
-    Two reasons this matters:
-      * gdigrab measures from the primary monitor's (0,0), so the window must
-        live there for the capture rectangle to line up;
-      * a hidden/minimized tab pauses requestAnimationFrame, which would
-        freeze the game - game over would never be detected.
-    """
-    try:
-        cdp = page.context.new_cdp_session(page)
-        window_id = cdp.send("Browser.getWindowForTarget")["windowId"]
-        bounds = cdp.send(
-            "Browser.getWindowBounds", {"windowId": window_id}
-        )["bounds"]
-        width = bounds["width"] if bounds["width"] > 100 else 1280
-        height = bounds["height"] if bounds["height"] > 100 else 720
-        cdp.send(
-            "Browser.setWindowBounds",
-            {
-                "windowId": window_id,
-                "bounds": {
-                    "windowState": "normal",
-                    "left": 0,
-                    "top": 0,
-                    "width": width,
-                    "height": height,
-                },
-            },
-        )
-    except Exception as error:
-        print(f"  ! Could not reposition the browser window: {error}")
-    try:
-        page.bring_to_front()
-    except Exception:
-        pass
-    time.sleep(0.4)
-
-
-def enter_fullscreen(page):
-    """Put the page in OS fullscreen on the primary monitor.
-
-    Playwright's clicks count as real user input, so the site's fullscreen
-    button is allowed to request fullscreen. Retries a few times in case the
-    window was minimized or the request was ignored.
-    """
-    for attempt in (1, 2, 3):
-        ensure_window_ready(page)
-        if not page.evaluate("Boolean(document.fullscreenElement)"):
-            page.click(FULLSCREEN_SELECTOR)
-        try:
-            page.wait_for_function(
-                "document.fullscreenElement !== null "
-                "&& document.visibilityState === 'visible'",
-                timeout=8000,
-            )
-            time.sleep(0.6)      # let the fullscreen layout settle
-            return
-        except Exception:
-            if attempt == 3:
-                raise RuntimeError(
-                    "The browser could not enter fullscreen. Make sure the "
-                    "window is not minimized and try again."
-                )
-            print("  ! Fullscreen did not engage, retrying ...")
-
-
-def wait_for_game_over(page, max_seconds):
-    """Poll for the game-over state while keeping the tab visible.
-
-    Returns True when the site reports game over, False on safety timeout.
-    """
-    start = time.time()
-    deadline = start + max_seconds
-    last_report = start
-    while time.time() < deadline:
-        if page.locator(GAME_OVER_SELECTOR).count() > 0:
-            return True
-        # A minimized or hidden tab pauses the game (requestAnimationFrame),
-        # so restore the window and re-enter fullscreen if needed.
-        try:
-            hidden = not page.evaluate("document.visibilityState === 'visible'")
-            fullscreen = page.evaluate("Boolean(document.fullscreenElement)")
-        except Exception:
-            hidden = True
-            fullscreen = True
-        if hidden or not fullscreen:
-            print("  ! Browser window is hidden or left fullscreen - restoring it ...")
-            ensure_window_ready(page)
-            if not fullscreen:
-                try:
-                    page.click(FULLSCREEN_SELECTOR)
-                except Exception:
-                    pass
-                time.sleep(0.5)
-        elapsed = time.time() - start
-        if time.time() - last_report >= 15:
-            print(f"  ... game still running ({int(elapsed)}s) ...")
-            last_report = time.time()
-        time.sleep(0.5)
-    return False
-
-
 def verify_mp4(path):
     """Check the recording exists and has a plausible size."""
     path = Path(path)
@@ -428,7 +450,7 @@ def run_game_recording(args):
             say(2, "Website ready.")
             stage = "entering fullscreen"
             enter_fullscreen(page)
-            say(3, "Entered fullscreen on the primary monitor.")
+            say(3, "Entered fullscreen.")
 
             stage = "configuring the game"
             page.select_option("#select-format", VIDEO_FORMAT)
@@ -444,6 +466,7 @@ def run_game_recording(args):
             say(6, "Screen recording started.")
 
             stage = "starting gameplay"
+            ensure_window_visible(page)   # the countdown needs a visible tab
             page.click(GAME_AREA_SELECTOR)
             page.wait_for_selector(GAME_PLAYING_SELECTOR, timeout=15000)
             say(7, "Gameplay started.")
@@ -603,7 +626,7 @@ def upload_to_youtube(mp4_path, title, description):
 # --------------------------------------------------------------------------
 
 def calibrate(args):
-    """Open the site fullscreen and print the capture rectangle to copy."""
+    """Fullscreen + measure the capture rectangle + dry-run one game."""
     mode_key = args.mode or GAME_MODE
     if mode_key not in GAME_MODES:
         sys.exit(f"Unknown game mode '{mode_key}'.")
@@ -614,7 +637,7 @@ def calibrate(args):
     browser = None
     page = None
     try:
-        print("\n=== CALIBRATION MODE ===")
+        print("\n=== CALIBRATION MODE (no recording) ===")
         print("Opening the site, entering fullscreen and selecting a mode ...\n")
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=False)
@@ -638,7 +661,7 @@ def calibrate(args):
                   f"screen={info['screenW']}x{info['screenH']} dpr={info['dpr']}")
             rect = determine_capture_rect(page)
             print("\nIf the canvas is not being captured correctly, you can set")
-            print("CAPTURE_MODE = \"manual\" in video_automation.py and use:")
+            print('CAPTURE_MODE = "manual" in video_automation.py and use:')
             print(f"""
     CAPTURE_X = {rect['x']}
     CAPTURE_Y = {rect['y']}      # from the TOP edge of the screen
@@ -647,7 +670,20 @@ def calibrate(args):
 """)
             if info["sx"] != 0 or info["sy"] != 0:
                 print("NOTE: the window is not on the primary monitor. Move it there.")
-            print("Press Enter to close the browser ...")
+
+            # Dry run: start a real game and verify game-over is detected.
+            print("\nDry run: starting a game to verify detection (no recording) ...")
+            ensure_window_visible(page)
+            page.click(GAME_AREA_SELECTOR)
+            page.wait_for_selector(GAME_PLAYING_SELECTOR, timeout=15000)
+            print("  Gameplay started - playing until game over ...")
+            over = wait_for_game_over(page, MAX_RECORDING_SECONDS)
+            if over:
+                print("  Game over detected. Dry run successful!")
+            else:
+                print(f"  Dry run did not reach game over within "
+                      f"{MAX_RECORDING_SECONDS}s.")
+            print("\nPress Enter to close the browser ...")
             input()
     except Exception as error:
         print(f"\nCalibration FAILED:\n  {error}")
@@ -682,7 +718,8 @@ def main(argv=None):
     parser.add_argument("--mode", default=None, help="game mode key, e.g. team-battle")
     parser.add_argument("--url", default=None, help="override WEBSITE_URL")
     parser.add_argument("--calibrate", action="store_true",
-                        help="print the screen rectangle instead of recording")
+                        help="fullscreen + measure rectangle + dry-run one game "
+                             "(no recording)")
     parser.add_argument("--no-upload", action="store_true",
                         help="skip the YouTube upload")
     args = parser.parse_args(argv)
