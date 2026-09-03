@@ -193,13 +193,23 @@ def ensure_window_visible(page):
     A hidden/minimized tab pauses requestAnimationFrame, which would freeze
     the game - game over would never be detected - so the window must stay
     visible during the whole run.
+
+    IMPORTANT: when the page is already in fullscreen, do NOT touch the
+    window size - on Windows, externally maximizing/restoring a fullscreen
+    Chrome window exits fullscreen, which moves the canvas away from the
+    bottom-left corner and breaks the recording rectangle.
     """
-    _win32_activate_browser_window()
+    try:
+        fullscreen = page.evaluate("Boolean(document.fullscreenElement)")
+    except Exception:
+        fullscreen = False
+    if not fullscreen:
+        _win32_activate_browser_window()
     try:
         page.bring_to_front()
     except Exception:
         pass
-    time.sleep(0.4)
+    time.sleep(0.3)
 
 
 def enter_fullscreen(page):
@@ -244,19 +254,23 @@ def wait_for_game_over(page, max_seconds):
         # so restore the window and re-enter fullscreen if needed.
         try:
             hidden = not page.evaluate("document.visibilityState === 'visible'")
-            fullscreen = page.evaluate("Boolean(document.fullscreenElement)")
         except Exception:
             hidden = True
+        if hidden:
+            print("  ! Browser window is hidden - restoring it ...")
+            _win32_activate_browser_window()   # never fullscreen while minimized
+            time.sleep(0.5)
+        try:
+            fullscreen = page.evaluate("Boolean(document.fullscreenElement)")
+        except Exception:
             fullscreen = True
-        if hidden or not fullscreen:
-            print("  ! Browser window is hidden or left fullscreen - restoring it ...")
-            ensure_window_visible(page)
-            if not fullscreen:
-                try:
-                    page.click(FULLSCREEN_SELECTOR)
-                except Exception:
-                    pass
-                time.sleep(0.5)
+        if not fullscreen:
+            print("  ! Browser left fullscreen - re-entering fullscreen ...")
+            try:
+                page.click(FULLSCREEN_SELECTOR)
+            except Exception:
+                pass
+            time.sleep(0.5)
         elapsed = time.time() - start
         if time.time() - last_report >= 15:
             print(f"  ... game still running ({int(elapsed)}s) ...")
@@ -373,7 +387,8 @@ def determine_capture_rect(page):
     if not box:
         raise RuntimeError("Could not measure the game canvas on the page.")
     info = page.evaluate(
-        "() => ({dpr: window.devicePixelRatio, sx: window.screenX, sy: window.screenY})"
+        "() => ({dpr: window.devicePixelRatio, sx: window.screenX, "
+        "sy: window.screenY, screenH: screen.height})"
     )
     if info["sx"] != 0 or info["sy"] != 0:
         print(
@@ -395,6 +410,12 @@ def determine_capture_rect(page):
         f"  Recording rectangle: x={rect['x']}  y={rect['y']}  "
         f"{rect['width']}x{rect['height']}  (dpr={info['dpr']})"
     )
+    if rect["y"] + rect["height"] < info["screenH"] - 4:
+        print(
+            "  ! The game canvas does not reach the bottom of the screen - the "
+            "site is probably NOT in fullscreen, so the video would not start "
+            "at 0px from the bottom. The automation will re-enter fullscreen."
+        )
     return rect
 
 
@@ -683,8 +704,8 @@ def calibrate(args):
             else:
                 print(f"  Dry run did not reach game over within "
                       f"{MAX_RECORDING_SECONDS}s.")
-            print("\nPress Enter to close the browser ...")
-            input()
+            print("\nClosing the browser automatically ...")
+            time.sleep(2)   # brief pause so you can see the Game Over screen
     except Exception as error:
         print(f"\nCalibration FAILED:\n  {error}")
         if page is not None:
