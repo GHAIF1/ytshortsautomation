@@ -32,6 +32,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+try:
+    import ctypes
+    from ctypes import wintypes
+except ImportError:            # non-Windows fallback
+    ctypes = None
+    wintypes = None
+
 # =========================================================================
 #  CONFIGURATION  - everything you normally need to change lives here
 # =========================================================================
@@ -86,6 +93,12 @@ MAX_RECORDING_SECONDS = 300   # safety limit ONLY. Normally the game-over
                               # round ends.
 
 FFMPEG_BINARY = "ffmpeg"      # or a full path, e.g. r"C:\ffmpeg\bin\ffmpeg.exe"
+
+# Browser to drive. "chrome" = your installed Google Chrome (recommended if
+# the bundled Playwright Chromium does not enter fullscreen correctly on
+# your system, e.g. in a VM/remote session). "chromium" = Playwright's
+# bundled Chromium. "msedge" = Microsoft Edge.
+BROWSER_CHANNEL = "chrome"
 
 # --- Video files ------------------------------------------------------------
 RECORDING_FOLDER = Path.home() / "Desktop" / "MyVideos"   # created automatically
@@ -149,42 +162,92 @@ def require_playwright():
         )
 
 
+def launch_browser(pw):
+    """Launch the configured browser, falling back to bundled Chromium."""
+    if BROWSER_CHANNEL:
+        try:
+            return pw.chromium.launch(headless=False, channel=BROWSER_CHANNEL)
+        except Exception as error:
+            print(f"  ! Could not launch browser channel '{BROWSER_CHANNEL}': {error}")
+            print("    Falling back to Playwright's bundled Chromium.")
+    return pw.chromium.launch(headless=False)
+
+
 # --------------------------------------------------------------------------
 #  Browser window management (Win32, no CDP)
 # --------------------------------------------------------------------------
 
-# Restore (if minimized), maximize and focus the Chromium window whose page
-# title contains "Bouncing Balls". Run through PowerShell so no Python window
-# libraries are needed. CDP Browser.* calls are deliberately avoided: on some
-# Playwright builds they hang the sync API.
-_WIN32_ACTIVATE_SCRIPT = r'''
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class W32 {
-  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-}
-"@
-$p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like '*Bouncing Balls*' } | Sort-Object StartTime -Descending | Select-Object -First 1
-if ($null -eq $p) { exit }
-if ([W32]::IsIconic($p.MainWindowHandle)) { [W32]::ShowWindow($p.MainWindowHandle, 9) | Out-Null }
-[W32]::ShowWindow($p.MainWindowHandle, 3) | Out-Null
-[W32]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-'''
-
-
-def _win32_activate_browser_window():
+def _set_dpi_aware():
+    """Make this process per-monitor DPI aware so Win32 calls return physical
+    pixels. Needed because the browser can be DPI-virtualized: it reports
+    dpr=1 and a CSS screen of e.g. 1280x720 while the real screen is
+    1920x1080 (Windows display scaling)."""
+    if ctypes is None or os.name != "nt":
+        return
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             _WIN32_ACTIVATE_SCRIPT],
-            capture_output=True, text=True, timeout=25,
-        )
-    except Exception as error:
-        print(f"  ! Could not activate the browser window: {error}")
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def _physical_screen_size():
+    """(width, height) of the primary screen in physical pixels."""
+    if ctypes is None or os.name != "nt":
+        return 1280, 720
+    user32 = ctypes.windll.user32
+    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+
+
+def _browser_hwnd():
+    """HWND of the Chromium window whose title contains 'Bouncing Balls'."""
+    if ctypes is None or os.name != "nt":
+        return None
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd, _lparam):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            if "Bouncing Balls" in buffer.value:
+                found.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return found[-1] if found else None
+
+
+def _window_rect(hwnd):
+    """Physical screen rect (left, top, right, bottom) of a window."""
+    if hwnd is None or ctypes is None:
+        return None
+    rect = wintypes.RECT()
+    if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return (rect.left, rect.top, rect.right, rect.bottom)
+    return None
+
+
+def _fill_window_to_screen():
+    """Restore (if minimized), move to (0,0) and resize the browser window so
+    it covers the whole screen. Only call while the page is NOT in fullscreen -
+    resizing a fullscreen Chrome window on Windows exits fullscreen."""
+    if ctypes is None or os.name != "nt":
+        return
+    hwnd = _browser_hwnd()
+    if hwnd is None:
+        print("  ! Could not find the browser window to resize it.")
+        return
+    user32 = ctypes.windll.user32
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)              # SW_RESTORE
+    phys_w, phys_h = _physical_screen_size()
+    user32.MoveWindow(hwnd, 0, 0, phys_w, phys_h, True)
+    user32.SetForegroundWindow(hwnd)
 
 
 def ensure_window_visible(page):
@@ -204,7 +267,7 @@ def ensure_window_visible(page):
     except Exception:
         fullscreen = False
     if not fullscreen:
-        _win32_activate_browser_window()
+        _fill_window_to_screen()
     try:
         page.bring_to_front()
     except Exception:
@@ -230,6 +293,15 @@ def enter_fullscreen(page):
                 timeout=6000,
             )
             time.sleep(0.6)      # let the fullscreen layout settle
+            win = _window_rect(_browser_hwnd())
+            phys_w, phys_h = _physical_screen_size()
+            if win is not None and (win[2] - win[0] < phys_w - 2
+                                    or win[3] - win[1] < phys_h - 2):
+                print(
+                    f"  ! Warning: the browser window ({win[2]-win[0]}x"
+                    f"{win[3]-win[1]}) does not cover the screen "
+                    f"({phys_w}x{phys_h}) - OS fullscreen may not have engaged."
+                )
             return
         except Exception:
             print(f"  ! Fullscreen did not engage (attempt {attempt}/3) - retrying ...")
@@ -258,7 +330,7 @@ def wait_for_game_over(page, max_seconds):
             hidden = True
         if hidden:
             print("  ! Browser window is hidden - restoring it ...")
-            _win32_activate_browser_window()   # never fullscreen while minimized
+            _fill_window_to_screen()   # never fullscreen while minimized
             time.sleep(0.5)
         try:
             fullscreen = page.evaluate("Boolean(document.fullscreenElement)")
@@ -372,8 +444,10 @@ def determine_capture_rect(page):
 
     "auto" measures the real position/size of the game canvas after the page
     is in fullscreen, so the video matches the game box exactly (bottom-left,
-    9:16). Coordinates are multiplied by devicePixelRatio because gdigrab
-    counts physical pixels.
+    9:16). CSS pixel coordinates are converted to physical pixels (gdigrab
+    records physical pixels) using the real ratio between the OS screen size
+    and the browser's CSS screen size - correct even when Windows display
+    scaling makes the browser report dpr=1.
     """
     if CAPTURE_MODE == "manual":
         return {
@@ -387,19 +461,28 @@ def determine_capture_rect(page):
     if not box:
         raise RuntimeError("Could not measure the game canvas on the page.")
     info = page.evaluate(
-        "() => ({dpr: window.devicePixelRatio, sx: window.screenX, "
-        "sy: window.screenY, screenH: screen.height})"
+        "() => ({sx: window.screenX, sy: window.screenY, "
+        "cssW: screen.width, cssH: screen.height})"
     )
+    phys_w, phys_h = _physical_screen_size()
+    scale_x = phys_w / max(1, info["cssW"])
+    scale_y = phys_h / max(1, info["cssH"])
     if info["sx"] != 0 or info["sy"] != 0:
         print(
-            "  ! The browser window is not on the primary monitor "
-            f"(screenX/Y = {info['sx']}/{info['sy']}). gdigrab records the "
-            "primary monitor - drag the window to the main monitor."
+            "  ! The browser window is not at the top-left of the screen "
+            f"(screenX/Y = {info['sx']}/{info['sy']}). The window is moved "
+            "to (0,0) before recording."
         )
-    x = max(0, round((info["sx"] + box["x"]) * info["dpr"]))
-    y = max(0, round((info["sy"] + box["y"]) * info["dpr"]))
-    width = max(2, round(box["width"] * info["dpr"]))
-    height = max(2, round(box["height"] * info["dpr"]))
+    x = max(0, round((info["sx"] + box["x"]) * scale_x))
+    y = max(0, round((info["sy"] + box["y"]) * scale_y))
+    width = max(2, round(box["width"] * scale_x))
+    height = max(2, round(box["height"] * scale_y))
+    # Keep the whole box: if it would extend past the screen edge, shift it
+    # instead of shrinking it, so the video stays 9:16 and ends at the bottom.
+    if x + width > phys_w:
+        x = max(0, phys_w - width)
+    if y + height > phys_h:
+        y = max(0, phys_h - height)
     rect = {
         "x": x,
         "y": y,
@@ -408,9 +491,9 @@ def determine_capture_rect(page):
     }
     print(
         f"  Recording rectangle: x={rect['x']}  y={rect['y']}  "
-        f"{rect['width']}x{rect['height']}  (dpr={info['dpr']})"
+        f"{rect['width']}x{rect['height']}  (scale {scale_x:.2f}x)"
     )
-    if rect["y"] + rect["height"] < info["screenH"] - 4:
+    if rect["y"] + rect["height"] < phys_h - 4:
         print(
             "  ! The game canvas does not reach the bottom of the screen - the "
             "site is probably NOT in fullscreen, so the video would not start "
@@ -463,7 +546,7 @@ def run_game_recording(args):
         say(1, f"Opening website: {url}")
         stage = "opening the website"
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=False)
+            browser = launch_browser(pw)
             page = browser.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_selector(GAME_AREA_SELECTOR, timeout=30000)
@@ -661,7 +744,7 @@ def calibrate(args):
         print("\n=== CALIBRATION MODE (no recording) ===")
         print("Opening the site, entering fullscreen and selecting a mode ...\n")
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=False)
+            browser = launch_browser(pw)
             page = browser.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_selector(GAME_AREA_SELECTOR, timeout=30000)
@@ -733,6 +816,7 @@ def calibrate(args):
 # --------------------------------------------------------------------------
 
 def main(argv=None):
+    _set_dpi_aware()
     parser = argparse.ArgumentParser(
         description="Record a game from the website and upload it to YouTube."
     )
