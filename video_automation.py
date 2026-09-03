@@ -36,9 +36,9 @@ from pathlib import Path
 # =========================================================================
 
 # --- Website ---------------------------------------------------------------
-# Local Live Server while developing. After deploying to GitHub Pages,
-# change this to e.g. "https://yourusername.github.io/yourrepo/"
-WEBSITE_URL = "http://127.0.0.1:5500/"
+# Live site on GitHub Pages. (Use http://127.0.0.1:5500/ while developing
+# with VS Code Live Server.)
+WEBSITE_URL = "https://ghaif1.github.io/ytshortsautomation/"
 
 # Game mode to play (keys come from GAME_MODES below). You can also override
 # per run:  python video_automation.py --mode team-battle
@@ -276,6 +276,110 @@ def determine_capture_rect(page):
 #  Website / browser workflow
 # --------------------------------------------------------------------------
 
+def ensure_window_ready(page):
+    """Restore the browser window (if minimized/background), move it to the
+    primary monitor's top-left corner and bring it to the front.
+
+    Two reasons this matters:
+      * gdigrab measures from the primary monitor's (0,0), so the window must
+        live there for the capture rectangle to line up;
+      * a hidden/minimized tab pauses requestAnimationFrame, which would
+        freeze the game - game over would never be detected.
+    """
+    try:
+        cdp = page.context.new_cdp_session(page)
+        window_id = cdp.send("Browser.getWindowForTarget")["windowId"]
+        bounds = cdp.send(
+            "Browser.getWindowBounds", {"windowId": window_id}
+        )["bounds"]
+        width = bounds["width"] if bounds["width"] > 100 else 1280
+        height = bounds["height"] if bounds["height"] > 100 else 720
+        cdp.send(
+            "Browser.setWindowBounds",
+            {
+                "windowId": window_id,
+                "bounds": {
+                    "windowState": "normal",
+                    "left": 0,
+                    "top": 0,
+                    "width": width,
+                    "height": height,
+                },
+            },
+        )
+    except Exception as error:
+        print(f"  ! Could not reposition the browser window: {error}")
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    time.sleep(0.4)
+
+
+def enter_fullscreen(page):
+    """Put the page in OS fullscreen on the primary monitor.
+
+    Playwright's clicks count as real user input, so the site's fullscreen
+    button is allowed to request fullscreen. Retries a few times in case the
+    window was minimized or the request was ignored.
+    """
+    for attempt in (1, 2, 3):
+        ensure_window_ready(page)
+        if not page.evaluate("Boolean(document.fullscreenElement)"):
+            page.click(FULLSCREEN_SELECTOR)
+        try:
+            page.wait_for_function(
+                "document.fullscreenElement !== null "
+                "&& document.visibilityState === 'visible'",
+                timeout=8000,
+            )
+            time.sleep(0.6)      # let the fullscreen layout settle
+            return
+        except Exception:
+            if attempt == 3:
+                raise RuntimeError(
+                    "The browser could not enter fullscreen. Make sure the "
+                    "window is not minimized and try again."
+                )
+            print("  ! Fullscreen did not engage, retrying ...")
+
+
+def wait_for_game_over(page, max_seconds):
+    """Poll for the game-over state while keeping the tab visible.
+
+    Returns True when the site reports game over, False on safety timeout.
+    """
+    start = time.time()
+    deadline = start + max_seconds
+    last_report = start
+    while time.time() < deadline:
+        if page.locator(GAME_OVER_SELECTOR).count() > 0:
+            return True
+        # A minimized or hidden tab pauses the game (requestAnimationFrame),
+        # so restore the window and re-enter fullscreen if needed.
+        try:
+            hidden = not page.evaluate("document.visibilityState === 'visible'")
+            fullscreen = page.evaluate("Boolean(document.fullscreenElement)")
+        except Exception:
+            hidden = True
+            fullscreen = True
+        if hidden or not fullscreen:
+            print("  ! Browser window is hidden or left fullscreen - restoring it ...")
+            ensure_window_ready(page)
+            if not fullscreen:
+                try:
+                    page.click(FULLSCREEN_SELECTOR)
+                except Exception:
+                    pass
+                time.sleep(0.5)
+        elapsed = time.time() - start
+        if time.time() - last_report >= 15:
+            print(f"  ... game still running ({int(elapsed)}s) ...")
+            last_report = time.time()
+        time.sleep(0.5)
+    return False
+
+
 def verify_mp4(path):
     """Check the recording exists and has a plausible size."""
     path = Path(path)
@@ -323,12 +427,8 @@ def run_game_recording(args):
 
             say(2, "Website ready.")
             stage = "entering fullscreen"
-            page.click(FULLSCREEN_SELECTOR)
-            page.wait_for_function(
-                "document.fullscreenElement !== null", timeout=10000
-            )
-            time.sleep(0.6)          # let the fullscreen layout settle
-            say(3, "Entered fullscreen.")
+            enter_fullscreen(page)
+            say(3, "Entered fullscreen on the primary monitor.")
 
             stage = "configuring the game"
             page.select_option("#select-format", VIDEO_FORMAT)
@@ -350,11 +450,7 @@ def run_game_recording(args):
 
             say(8, "Game is running - waiting for game over ...")
             stage = "waiting for game over"
-            try:
-                page.wait_for_selector(
-                    GAME_OVER_SELECTOR, timeout=MAX_RECORDING_SECONDS * 1000
-                )
-            except Exception:
+            if not wait_for_game_over(page, MAX_RECORDING_SECONDS):
                 safety_hit = True
                 print(
                     f"  ! Safety timeout after {MAX_RECORDING_SECONDS}s - game "
@@ -525,11 +621,7 @@ def calibrate(args):
             page = browser.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_selector(GAME_AREA_SELECTOR, timeout=30000)
-            page.click(FULLSCREEN_SELECTOR)
-            page.wait_for_function(
-                "document.fullscreenElement !== null", timeout=10000
-            )
-            time.sleep(0.6)
+            enter_fullscreen(page)
             page.select_option("#select-format", VIDEO_FORMAT)
             page.click(GAME_MODES[mode_key]["button"])
             page.wait_for_selector(GAME_READY_SELECTOR, timeout=10000)

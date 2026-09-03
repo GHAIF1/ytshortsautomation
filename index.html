@@ -686,6 +686,19 @@ function applyTeamDamage() {
   }
 }
 
+function endRound(message) {
+  if (winnerAnnounced) return;
+  winnerAnnounced = true;
+  showMessage(message, 3000);
+  setGameState('winner');
+  endTimer = setTimeout(() => {
+    gameEnded = true;
+    gameStarted = false;
+    setGameState('game-over');
+    showMessage('Game Over', 0);
+  }, 3000);
+}
+
 function animate(timestamp) {
   if (gameEnded) {
     requestAnimationFrame(animate);
@@ -720,27 +733,15 @@ function animate(timestamp) {
     const livingBalls = balls.filter(ball => ball.alive);
     const livingTeams = [...new Set(livingBalls.map(ball => ball.team).filter(Boolean))];
     const teamsInRound = [...new Set(balls.map(ball => ball.team).filter(Boolean))];
-    if (activeMode === 'teams' && !winnerAnnounced && teamsInRound.length === 2 && livingTeams.length === 1) {
+    if (activeMode === 'teams' && teamsInRound.length === 2 && livingTeams.length === 1) {
       const winningTeam = livingTeams[0];
-      showMessage(`${winningTeam === 'top' ? 'Blue' : 'Pink'} team won!`, 3000);
-      winnerAnnounced = true;
-      setGameState('winner');
-      endTimer = setTimeout(() => {
-      gameEnded = true;
-      gameStarted = false;
-      setGameState('game-over');
-      showMessage('Game Over', 0);
-      }, 3000);
-    } else if (['hazards', 'meteors', 'rotating'].includes(activeMode) && !winnerAnnounced && balls.length > 1 && livingBalls.length === 1) {
-      showMessage(`Ball number ${livingBalls[0].id} won!`, 3000);
-      winnerAnnounced = true;
-      setGameState('winner');
-      endTimer = setTimeout(() => {
-      gameEnded = true;
-      gameStarted = false;
-      setGameState('game-over');
-      showMessage('Game Over', 0);
-      }, 3000);
+      endRound(`${winningTeam === 'top' ? 'Blue' : 'Pink'} team won!`);
+    } else if (activeMode === 'teams' && teamsInRound.length === 2 && livingTeams.length === 0) {
+      endRound('Draw - both teams wiped out!');
+    } else if (['hazards', 'meteors', 'rotating'].includes(activeMode) && balls.length > 1 && livingBalls.length === 1) {
+      endRound(`Ball number ${livingBalls[0].id} won!`);
+    } else if (['hazards', 'meteors', 'rotating'].includes(activeMode) && livingBalls.length === 0) {
+      endRound('No survivors!');
     }
   }
   if (trailMode === 'dots') {
