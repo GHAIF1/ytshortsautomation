@@ -251,7 +251,7 @@ class Ball {
     ctx.fillStyle = this.colour;
     ctx.fill();
     ctx.fillStyle = '#fff';
-    ctx.font = `${Math.max(10, this.r * 0.8)}px sans-serif`;
+    ctx.font = `bold ${Math.max(10, this.r * 1.0)}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(this.id, this.x, this.y);
@@ -695,7 +695,12 @@ function endRound(message) {
     gameEnded = true;
     gameStarted = false;
     setGameState('game-over');
-    showMessage('Game Over', 0);
+    // No "Game Over" screen: the winner message above fades out on its own,
+    // so the game just ends on the final frozen frame and the recording
+    // stops there - clean ending without a game-over overlay.
+    const overlay = document.getElementById('msgOverlay');
+    overlay.textContent = '';
+    overlay.style.opacity = '0';
   }, 3000);
 }
 
