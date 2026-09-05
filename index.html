@@ -30,8 +30,17 @@
   #msgOverlay{
     position:fixed;top:0;left:0;width:100%;height:100%;
     display:flex;justify-content:center;align-items:center;
-    pointer-events:none;background:rgba(0,0,0,0.6);color:#fff;font-size:2em;
-    z-index:1;opacity:0;transition:opacity .4s;white-space:pre-line;text-align:center;
+    pointer-events:none;background:rgba(0,0,0,0.6);color:#fff;
+    z-index:1;opacity:0;transition:opacity .4s;text-align:center;
+  }
+  #overlay-title{
+    position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    font-size:2em;line-height:1.5;
+  }
+  #overlay-sub{
+    position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    font-size:1.4em;line-height:1.5;
+    margin-top:3em;
   }
 </style>
 </head>
@@ -112,7 +121,10 @@
   <button id="btn-reset">Reset Balls</button>
 </div>
 
-<div id="msgOverlay"></div>
+<div id="msgOverlay">
+  <div id="overlay-title"></div>
+  <div id="overlay-sub"></div>
+</div>
 
 <script>
 /* ==========================================================
@@ -426,7 +438,13 @@ function createBalls() {
           ? canvas.height * 0.72 + Math.random() * Math.max(0, canvas.height * 0.28 - radius)
           : radius + Math.random() * Math.max(0, canvas.height - radius * 2);
       attempts++;
-    } while (hazards.some(hazard => Math.hypot(hazard.x - x, hazard.y - y) <= hazard.r + radius) && attempts < 30);
+    } while (
+      attempts < 30 &&
+      (
+        hazards.some(hazard => Math.hypot(hazard.x - x, hazard.y - y) <= hazard.r + radius) ||
+        balls.some(ball => Math.hypot(ball.x - x, ball.y - y) < ball.r + radius + 0.5)
+      )
+    );
     const angle = Math.random() * Math.PI * 2;
     const speed = (1 + Math.random() * 2) * speedFactor;
     const colour = team ? TEAM_COLORS[team] : ballColour;
@@ -511,7 +529,11 @@ function updateSettings() {
 
 function showMessage(message, duration = 900) {
   const overlay = document.getElementById('msgOverlay');
-  overlay.textContent = message;
+  const title = document.getElementById('overlay-title');
+  const sub = document.getElementById('overlay-sub');
+  const lines = String(message).split('\n');
+  title.textContent = lines[0] || '';
+  sub.textContent = lines.slice(1).join('\n');
   overlay.style.opacity = '1';
   clearTimeout(showMessage.timer);
   if (duration > 0) {
@@ -665,6 +687,42 @@ function resolveBallCollisions() {
   }
 }
 
+function resolveHazardCollisions() {
+  for (let firstIndex = 0; firstIndex < hazards.length; firstIndex++) {
+    const first = hazards[firstIndex];
+    if (first.type !== 'moving') continue;
+    for (let secondIndex = firstIndex + 1; secondIndex < hazards.length; secondIndex++) {
+      const second = hazards[secondIndex];
+      if (second.type !== 'moving') continue;
+      const dx = second.x - first.x;
+      const dy = second.y - first.y;
+      const minimumDistance = first.r + second.r;
+      const distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared >= minimumDistance * minimumDistance) continue;
+
+      const distance = Math.sqrt(distanceSquared);
+      const normalX = distance === 0 ? 1 : dx / distance;
+      const normalY = distance === 0 ? 0 : dy / distance;
+      const overlap = minimumDistance - distance + 0.01;
+      first.x -= normalX * overlap / 2;
+      first.y -= normalY * overlap / 2;
+      second.x += normalX * overlap / 2;
+      second.y += normalY * overlap / 2;
+
+      const relativeVelocityX = second.vx - first.vx;
+      const relativeVelocityY = second.vy - first.vy;
+      const velocityAlongNormal = relativeVelocityX * normalX + relativeVelocityY * normalY;
+      if (velocityAlongNormal < 0) {
+        const impulse = -(1 + elasticity) * velocityAlongNormal / 2;
+        first.vx -= impulse * normalX;
+        first.vy -= impulse * normalY;
+        second.vx += impulse * normalX;
+        second.vy += impulse * normalY;
+      }
+    }
+  }
+}
+
 function applyTeamDamage() {
   if (activeMode !== 'teams') return;
   for (let firstIndex = 0; firstIndex < balls.length; firstIndex++) {
@@ -699,7 +757,8 @@ function endRound(message) {
     // so the game just ends on the final frozen frame and the recording
     // stops there - clean ending without a game-over overlay.
     const overlay = document.getElementById('msgOverlay');
-    overlay.textContent = '';
+    document.getElementById('overlay-title').textContent = '';
+    document.getElementById('overlay-sub').textContent = '';
     overlay.style.opacity = '0';
   }, 3000);
 }
@@ -719,6 +778,7 @@ function animate(timestamp) {
   }
   if (gameStarted) {
     hazards.forEach(hazard => hazard.update(dt));
+    resolveHazardCollisions();
     balls.forEach(ball => ball.update(dt));
     applyTeamDamage();
     resolveBallCollisions();
