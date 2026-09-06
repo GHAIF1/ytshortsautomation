@@ -558,6 +558,7 @@ function prepareGame() {
   gameStarted = false;
   gameEnded = false;
   winnerAnnounced = false;
+  document.getElementById('msgOverlay').style.background = '';  // reset black CTA bg
   showMessage('Choose your number', 0);
   setGameState('ready');
 }
@@ -747,19 +748,24 @@ function applyTeamDamage() {
 function endRound(message) {
   if (winnerAnnounced) return;
   winnerAnnounced = true;
-  showMessage(message, 3000);
+  showMessage(message, 0);   // stays visible; the timing is handled below
   setGameState('winner');
   endTimer = setTimeout(() => {
-    gameEnded = true;
-    gameStarted = false;
-    setGameState('game-over');
-    // No "Game Over" screen: the winner message above fades out on its own,
-    // so the game just ends on the final frozen frame and the recording
-    // stops there - clean ending without a game-over overlay.
+    // After the winner text: a "like and follow" call-to-action on a
+    // solid black background for 3 seconds, then the round truly ends.
     const overlay = document.getElementById('msgOverlay');
-    document.getElementById('overlay-title').textContent = '';
+    overlay.style.background = '#000';
+    document.getElementById('overlay-title').textContent = 'LIKE and FOLLOW';
     document.getElementById('overlay-sub').textContent = '';
-    overlay.style.opacity = '0';
+    overlay.style.opacity = '1';
+    endTimer = setTimeout(() => {
+      gameEnded = true;
+      gameStarted = false;
+      setGameState('game-over');
+      document.getElementById('overlay-title').textContent = '';
+      document.getElementById('overlay-sub').textContent = '';
+      overlay.style.opacity = '0';
+    }, 3000);
   }, 3000);
 }
 
