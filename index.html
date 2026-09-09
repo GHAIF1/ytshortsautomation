@@ -212,6 +212,19 @@ const ROTATING_PLANK_COUNT = 3;
 /* ==========================================================
    Ball class (includes a numeric label)
    ========================================================== */
+
+/* Light balls (white, yellow, other very pale colours) get a black
+   number so it stays readable; everything else keeps white. */
+function numberColourFor(ballColour) {
+  const hex = String(ballColour).replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return '#fff';
+  const red = parseInt(hex.slice(0, 2), 16) / 255;
+  const green = parseInt(hex.slice(2, 4), 16) / 255;
+  const blue = parseInt(hex.slice(4, 6), 16) / 255;
+  const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  return luminance > 0.85 ? '#000' : '#fff';
+}
+
 class Ball {
   constructor(x, y, vx, vy, r, colour, id, team = null) {
     this.x = x; this.y = y;
@@ -262,7 +275,7 @@ class Ball {
     ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
     ctx.fillStyle = this.colour;
     ctx.fill();
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = numberColourFor(this.colour);
     ctx.font = `bold ${Math.max(10, this.r * 1.0)}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -748,24 +761,19 @@ function applyTeamDamage() {
 function endRound(message) {
   if (winnerAnnounced) return;
   winnerAnnounced = true;
-  showMessage(message, 0);   // stays visible; the timing is handled below
+  showMessage(message, 0);   // winner text for 3 seconds, then the round
+                             // ends. The recording automation appends its
+                             // own 3-second black "LIKE and FOLLOW" ending
+                             // screen to the video afterwards.
   setGameState('winner');
   endTimer = setTimeout(() => {
-    // After the winner text: a "like and follow" call-to-action on a
-    // solid black background for 3 seconds, then the round truly ends.
+    gameEnded = true;
+    gameStarted = false;
+    setGameState('game-over');
     const overlay = document.getElementById('msgOverlay');
-    overlay.style.background = '#000';
-    document.getElementById('overlay-title').textContent = 'LIKE and FOLLOW';
+    document.getElementById('overlay-title').textContent = '';
     document.getElementById('overlay-sub').textContent = '';
-    overlay.style.opacity = '1';
-    endTimer = setTimeout(() => {
-      gameEnded = true;
-      gameStarted = false;
-      setGameState('game-over');
-      document.getElementById('overlay-title').textContent = '';
-      document.getElementById('overlay-sub').textContent = '';
-      overlay.style.opacity = '0';
-    }, 3000);
+    overlay.style.opacity = '0';
   }, 3000);
 }
 
